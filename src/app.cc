@@ -129,13 +129,29 @@ void App::PushFrame(const cv::UMat& frame) {
     std::vector<std::mutex> image_mutex_vector(sensor_data_interface_.num_img_);
     std::vector<cv::UMat> images_warped_vector(sensor_data_interface_.num_img_);
 
+    size_t frame_idx = 0;
+
+    // 假设你选择在第一个图像中一个固定点 (x, y)
+    int x = 1000;  // 源图像中的 x 坐标
+    int y = 500;   // 源图像中的 y 坐标
+
+    // 用于计算拼接后图像中的位置
+    int total_offset_x = 0; // 总的 x 偏移量
+    const auto& roi_vector = image_stitcher_.getRoiVector(); // 获取 ROI 向量
+
+
     while (true) {
         auto t_start = std::chrono::steady_clock::now();
-
+        std::vector<std::thread> warp_thread_vect;
         sensor_data_interface_.get_image_vector(image_vector, image_mutex_vector);
         auto t_got_images = std::chrono::steady_clock::now();
 
-        std::vector<std::thread> warp_thread_vect;
+        // 记录拼接后的图像的总宽度
+        total_offset_x = 0;
+        for (size_t i = 0; i < sensor_data_interface_.num_img_; ++i) {
+            total_offset_x += roi_vector[i].width;
+        }
+
         for (size_t img_idx = 0; img_idx < sensor_data_interface_.num_img_; ++img_idx) {
             warp_thread_vect.emplace_back(
                 &ImageStitcher::WarpImages,
@@ -153,6 +169,31 @@ void App::PushFrame(const cv::UMat& frame) {
         }
         auto t_stitched = std::chrono::steady_clock::now();
 
+        int offset_x = 0; // 当前图像的 x 偏移量（拼接时图像的左上角位置）
+        for (size_t img_idx = 0; img_idx < sensor_data_interface_.num_img_; ++img_idx) {
+            cv::Mat xmap = image_stitcher_.getFinalXMap(img_idx).getMat(cv::ACCESS_READ);
+            cv::Mat ymap = image_stitcher_.getFinalYMap(img_idx).getMat(cv::ACCESS_READ);
+
+            float new_x = xmap.at<float>(y, x);
+            float new_y = ymap.at<float>(y, x);
+
+            // 计算该点在拼接图像中的位置
+            int final_x = new_x + offset_x;
+            int final_y = new_y;
+
+            // 打印该点在拼接图像中的位置
+            std::cout << "Image " << img_idx << ": Point (" << x << ", " << y << ") maps to ("
+                      << final_x << ", " << final_y << ") in the stitched image." << std::endl;
+
+             // 在拼接后的图像上标记该点并添加文本
+            cv::circle(image_concat_umat_, cv::Point(final_x, final_y), 5, cv::Scalar(0, 255, 0), -1); // 用绿色圆圈标记点
+            cv::putText(image_concat_umat_, "Position of steel billet", cv::Point(final_x + 10, final_y + 10), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0), 1);
+
+            // 更新下一个图像的偏移量
+            offset_x += roi_vector[img_idx].width;
+        }
+        
+        frame_idx++;
         PushFrame(image_concat_umat_);
         auto t_pushed = std::chrono::steady_clock::now();
 
