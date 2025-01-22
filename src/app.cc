@@ -14,6 +14,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
 #include <libavutil/timestamp.h>
+#include <libavutil/error.h>
 }
 
 // 构造函数
@@ -49,21 +50,17 @@ App::App() {
     image_concat_umat_ = cv::UMat(image_roi_vect[0].height, total_cols_, CV_8UC3);
 }
 
-// 推流函数
 void App::PushFrame(const cv::UMat& frame) {
     static bool initialized = false;
     static AVFormatContext* fmt_ctx = nullptr;
     static AVStream* video_stream = nullptr;
     static AVCodecContext* codec_ctx = nullptr;
     static SwsContext* sws_ctx = nullptr;
-
     static int64_t frame_index = 0;
-
 
     if (!initialized) {
         avformat_network_init();
-        avformat_alloc_output_context2(&fmt_ctx, nullptr, "rtp", "rtsp://192.168.1.81:8554/live");
-        
+        avformat_alloc_output_context2(&fmt_ctx, nullptr, "rtsp", "rtsp://192.168.1.81:8554/live");
 
         AVCodec* codec = avcodec_find_encoder_by_name("libx264");
         if (!codec) {
@@ -80,32 +77,21 @@ void App::PushFrame(const cv::UMat& frame) {
         codec_ctx->framerate = {60, 1};
         codec_ctx->bit_rate = 8 * 1024 * 1024;
         codec_ctx->gop_size = 50;
-        int ret = avcodec_open2(codec_ctx, codec, nullptr);
-        if (ret < 0) {
-            char error_buf[AV_ERROR_MAX_STRING_SIZE];
-            av_strerror(ret, error_buf, sizeof(error_buf));
-            std::cerr << "Failed to open codec: " << error_buf << std::endl;
-            return; 
+
+        if (avcodec_open2(codec_ctx, codec, nullptr) < 0) {
+            std::cerr << "Failed to open codec!" << std::endl;
+            return;
         }
 
         sws_ctx = sws_getContext(frame.cols, frame.rows, AV_PIX_FMT_BGR24,
-                                 frame.cols, frame.rows, AV_PIX_FMT_YUV420P,
-                                 SWS_BICUBIC, nullptr, nullptr, nullptr);
+                                frame.cols, frame.rows, AV_PIX_FMT_YUV420P,
+                                SWS_BICUBIC, nullptr, nullptr, nullptr);
 
         avcodec_parameters_from_context(video_stream->codecpar, codec_ctx);
         video_stream->time_base = codec_ctx->time_base;
-        std::cout << "Attempting to open RTSP stream at: rtsp://192.168.1.81:8554/live" << std::endl;
-        int ret2 = avio_open(&fmt_ctx->pb, "rtsp://192.168.1.81:8554/live", AVIO_FLAG_WRITE);
-        if (ret2 < 0) {
-            char err_buf[AV_ERROR_MAX_STRING_SIZE] = {0};
-              av_strerror(ret2, err_buf, sizeof(err_buf));
-                 std::cerr << "Failed to open RTSP stream. Error code: " << ret2 << ", Error message: " << err_buf << std::endl;
-            return;
-        }
-        
-        if(avformat_write_header(fmt_ctx, nullptr)<0)
-        {
-            std::cerr <<"Failed"<< std::endl;
+
+        if (avformat_write_header(fmt_ctx, nullptr) < 0) {
+            std::cerr << "Failed to write header!" << std::endl;
             return;
         }
 
@@ -120,21 +106,11 @@ void App::PushFrame(const cv::UMat& frame) {
 
     uint8_t* bgr_data[1] = {frame.getMat(cv::ACCESS_READ).data};
     int bgr_linesize[1] = {int(frame.step)};
-    sws_scale(sws_ctx, bgr_data, bgr_linesize, 0, frame.rows,
-            av_frame->data, av_frame->linesize);
+    sws_scale(sws_ctx, bgr_data, bgr_linesize, 0, frame.rows, av_frame->data, av_frame->linesize);
 
-    //     // 获取当前时间并转换为毫秒级时间戳
-    // auto now = std::chrono::system_clock::now();
-    // auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-
-    // 设置 PTS (Presentation Time Stamp)
-
-
-    // av_frame->pts = frame_index++;
-    int64_t duration = av_rescale_q(1, {1, 30}, codec_ctx->time_base); // 计算单帧时间间隔
+    int64_t duration = av_rescale_q(1, {1, 30}, codec_ctx->time_base);
     av_frame->pts = frame_index * duration;
     frame_index++;
-
 
     AVPacket* pkt = av_packet_alloc();
     avcodec_send_frame(codec_ctx, av_frame);
@@ -145,7 +121,6 @@ void App::PushFrame(const cv::UMat& frame) {
     av_packet_free(&pkt);
     av_frame_free(&av_frame);
 }
-
 
 
 // 主运行函数
