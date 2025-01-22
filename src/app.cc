@@ -49,7 +49,7 @@ App::App() {
     }
     image_concat_umat_ = cv::UMat(image_roi_vect[0].height, total_cols_, CV_8UC3);
 }
-
+// 推流函数
 void App::PushFrame(const cv::UMat& frame) {
     static bool initialized = false;
     static AVFormatContext* fmt_ctx = nullptr;
@@ -131,7 +131,7 @@ void App::PushFrame(const cv::UMat& frame) {
 
     size_t frame_idx = 0;
 
-    // 假设你选择在第一个图像中一个固定点 (x, y)
+    // 例如图像中一个固定点 (x, y)
     int x = 1000;  // 源图像中的 x 坐标
     int y = 500;   // 源图像中的 y 坐标
 
