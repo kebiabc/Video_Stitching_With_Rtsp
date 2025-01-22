@@ -20,36 +20,47 @@ extern "C" {
 // 构造函数
 App::App() {
     sensor_data_interface_.InitVideoCapture();
-    std::vector<cv::UMat> first_image_vector(sensor_data_interface_.num_img_);
-    std::vector<cv::Mat> first_mat_vector(sensor_data_interface_.num_img_);
-    std::vector<cv::UMat> reproj_xmap_vector, undist_xmap_vector;
-    std::vector<cv::UMat> undist_ymap_vector, reproj_ymap_vector;
-    std::vector<cv::Rect> image_roi_vect;
-    std::vector<std::mutex> image_mutex_vector(sensor_data_interface_.num_img_);
 
+    std::vector<cv::UMat> first_image_vector = std::vector<cv::UMat>(sensor_data_interface_.num_img_);
+    std::vector<cv::Mat> first_mat_vector = std::vector<cv::Mat>(sensor_data_interface_.num_img_);
+    std::vector<cv::UMat> reproj_xmap_vector;
+    std::vector<cv::UMat> reproj_ymap_vector;
+    std::vector<cv::UMat> undist_xmap_vector;
+    std::vector<cv::UMat> undist_ymap_vector;
+    std::vector<cv::Rect> image_roi_vect;
+
+    std::vector<std::mutex> image_mutex_vector(sensor_data_interface_.num_img_);
     sensor_data_interface_.get_image_vector(first_image_vector, image_mutex_vector);
+
     for (size_t i = 0; i < sensor_data_interface_.num_img_; ++i) {
         first_image_vector[i].copyTo(first_mat_vector[i]);
     }
 
     StitchingParamGenerator stitching_param_generator(first_mat_vector);
+
     stitching_param_generator.GetReprojParams(
-        undist_xmap_vector, undist_ymap_vector,
-        reproj_xmap_vector, reproj_ymap_vector, image_roi_vect
+        undist_xmap_vector,
+        undist_ymap_vector,
+        reproj_xmap_vector,
+        reproj_ymap_vector,
+        image_roi_vect
     );
 
     image_stitcher_.SetParams(
-        100, undist_xmap_vector, undist_ymap_vector,
-        reproj_xmap_vector, reproj_ymap_vector, image_roi_vect
+        100,
+        undist_xmap_vector,
+        undist_ymap_vector,
+        reproj_xmap_vector,
+        reproj_ymap_vector,
+        image_roi_vect
     );
-
     total_cols_ = 0;
-    for (const auto& roi : image_roi_vect) {
-        total_cols_ += roi.width;
+    for (size_t i = 0; i < sensor_data_interface_.num_img_; ++i) {
+        total_cols_ += image_roi_vect[i].width;
     }
     image_concat_umat_ = cv::UMat(image_roi_vect[0].height, total_cols_, CV_8UC3);
 }
-// 推流函数
+
 void App::PushFrame(const cv::UMat& frame) {
     static bool initialized = false;
     static AVFormatContext* fmt_ctx = nullptr;
@@ -128,10 +139,14 @@ void App::PushFrame(const cv::UMat& frame) {
     std::vector<cv::UMat> image_vector(sensor_data_interface_.num_img_);
     std::vector<std::mutex> image_mutex_vector(sensor_data_interface_.num_img_);
     std::vector<cv::UMat> images_warped_vector(sensor_data_interface_.num_img_);
+    std::thread record_videos_thread(
+        &SensorDataInterface::RecordVideos,
+        &sensor_data_interface_
+    );
 
     size_t frame_idx = 0;
 
-    // 例如图像中一个固定点 (x, y)
+    // 假设你选择在第一个图像中一个固定点 (x, y)
     int x = 1000;  // 源图像中的 x 坐标
     int y = 500;   // 源图像中的 y 坐标
 
@@ -193,8 +208,13 @@ void App::PushFrame(const cv::UMat& frame) {
             offset_x += roi_vector[img_idx].width;
         }
         
-        frame_idx++;
+        // 存储/推流拼接后的图像
+        // imwrite("../results/image_concat_umat_" + std::to_string(frame_idx) + ".png",
+        //         image_concat_umat_);
         PushFrame(image_concat_umat_);
+        
+        frame_idx++;
+        
         auto t_pushed = std::chrono::steady_clock::now();
 
         std::cout << "Image capture: "
