@@ -19,7 +19,7 @@ extern "C" {
 }
 
 // 构造函数
-App::App() {
+App::App() : is_running_(false), total_cols_(0) {
     sensor_data_interface_.InitVideoCapture();
 
     std::vector<cv::UMat> first_image_vector = std::vector<cv::UMat>(sensor_data_interface_.num_img_);
@@ -86,8 +86,8 @@ void App::PushFrame(const cv::UMat& frame) {
         codec_ctx->width = frame.cols;
         codec_ctx->height = frame.rows;
         codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
-        codec_ctx->time_base = {1, 60};
-        codec_ctx->framerate = {60, 1};
+        codec_ctx->time_base = {1, 24};
+        codec_ctx->framerate = {24, 1};
         codec_ctx->bit_rate = 8 * 1024 * 1024;
         codec_ctx->gop_size = 50;
 
@@ -135,8 +135,8 @@ void App::PushFrame(const cv::UMat& frame) {
     av_frame_free(&av_frame);
 }
 
-// 主运行函数
-[[noreturn]] void App::run_stitching() {
+// 拼接图像帧
+void App::StitchFrames() {
     std::vector<cv::UMat> image_vector(sensor_data_interface_.num_img_);
     std::vector<std::mutex> image_mutex_vector(sensor_data_interface_.num_img_);
     std::vector<cv::UMat> images_warped_vector(sensor_data_interface_.num_img_);
@@ -155,11 +155,7 @@ void App::PushFrame(const cv::UMat& frame) {
     int total_offset_x = 0; // 总的 x 偏移量
     const auto& roi_vector = image_stitcher_.getRoiVector(); // 获取 ROI 向量
 
-    // 缓冲区队列
-    std::queue<cv::UMat> frame_buffer;
-    const size_t max_buffer_size = 3; // 缓冲区最大帧数
-
-    while (true) {
+    while (is_running_) {
         auto t_start = std::chrono::steady_clock::now();
         std::vector<std::thread> warp_thread_vect;
         sensor_data_interface_.get_image_vector(image_vector, image_mutex_vector);
@@ -210,15 +206,10 @@ void App::PushFrame(const cv::UMat& frame) {
         }
 
         // 将拼接后的图像存入缓冲区
-        frame_buffer.push(image_concat_umat_);
-
-        // 如果缓冲区已满，等待推送并清空缓冲区
-        if (frame_buffer.size() > max_buffer_size) {
-            while (!frame_buffer.empty()) {
-                PushFrame(frame_buffer.front());
-                frame_buffer.pop();
-                std::this_thread::sleep_for(std::chrono::milliseconds(16)); // 控制帧率，确保60fps
-            }
+        {
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            frame_buffer_.push(image_concat_umat_);
+            buffer_cond_.notify_all();  // 唤醒推流线程
         }
 
         frame_idx++;
@@ -230,7 +221,42 @@ void App::PushFrame(const cv::UMat& frame) {
     }
 }
 
+// 推流图像帧
+void App::StreamFrames() {
+    while (is_running_) {
+        cv::UMat frame_to_push;
+        {
+            std::unique_lock<std::mutex> lock(buffer_mutex_);
+            buffer_cond_.wait(lock, [this] { return !frame_buffer_.empty() || !is_running_; });
+
+            if (!frame_buffer_.empty()) {
+                frame_to_push = frame_buffer_.front();
+                frame_buffer_.pop();
+            }
+        }
+
+        if (!frame_to_push.empty()) {
+            PushFrame(frame_to_push);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(16)); // 控制推流速率，确保60fps
+    }
+}
+
+// 主运行函数
+[[noreturn]] void App::run_stitching() {
+    is_running_ = true;
+
+    // 启动拼接和推流线程
+    stitching_thread_ = std::thread(&App::StitchFrames, this);
+    streaming_thread_ = std::thread(&App::StreamFrames, this);
+
+    // 等待两个线程结束
+    stitching_thread_.join();
+    streaming_thread_.join();
+}
+
 int main() {
     App app;
     app.run_stitching();
 }
+
