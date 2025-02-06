@@ -4,6 +4,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <queue>
 #include <chrono>
 
 #include "image_stitcher.h"
@@ -60,7 +61,8 @@ App::App() {
     }
     image_concat_umat_ = cv::UMat(image_roi_vect[0].height, total_cols_, CV_8UC3);
 }
-#推流函数
+
+// 推流函数
 void App::PushFrame(const cv::UMat& frame) {
     static bool initialized = false;
     static AVFormatContext* fmt_ctx = nullptr;
@@ -133,7 +135,6 @@ void App::PushFrame(const cv::UMat& frame) {
     av_frame_free(&av_frame);
 }
 
-
 // 主运行函数
 [[noreturn]] void App::run_stitching() {
     std::vector<cv::UMat> image_vector(sensor_data_interface_.num_img_);
@@ -154,6 +155,9 @@ void App::PushFrame(const cv::UMat& frame) {
     int total_offset_x = 0; // 总的 x 偏移量
     const auto& roi_vector = image_stitcher_.getRoiVector(); // 获取 ROI 向量
 
+    // 缓冲区队列
+    std::queue<cv::UMat> frame_buffer;
+    const size_t max_buffer_size = 3; // 缓冲区最大帧数
 
     while (true) {
         auto t_start = std::chrono::steady_clock::now();
@@ -179,6 +183,7 @@ void App::PushFrame(const cv::UMat& frame) {
                 std::ref(image_concat_umat_)
             );
         }
+
         for (auto& warp_thread : warp_thread_vect) {
             warp_thread.join();
         }
@@ -196,34 +201,30 @@ void App::PushFrame(const cv::UMat& frame) {
             int final_x = new_x + offset_x;
             int final_y = new_y;
 
-            // 打印该点在拼接图像中的位置
-            std::cout << "Image " << img_idx << ": Point (" << x << ", " << y << ") maps to ("
-                      << final_x << ", " << final_y << ") in the stitched image." << std::endl;
-
-             // 在拼接后的图像上标记该点并添加文本
+            // 在拼接后的图像上标记该点并添加文本
             cv::circle(image_concat_umat_, cv::Point(final_x, final_y), 5, cv::Scalar(0, 255, 0), -1); // 用绿色圆圈标记点
             cv::putText(image_concat_umat_, "Position of steel billet", cv::Point(final_x + 10, final_y + 10), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0), 1);
 
             // 更新下一个图像的偏移量
             offset_x += roi_vector[img_idx].width;
         }
-        
-        // 存储/推流拼接后的图像
-        // imwrite("../results/image_concat_umat_" + std::to_string(frame_idx) + ".png",
-        //         image_concat_umat_);
-        PushFrame(image_concat_umat_);
-        
-        frame_idx++;
-        
-        auto t_pushed = std::chrono::steady_clock::now();
 
-        std::cout << "Image capture: "
-                  << std::chrono::duration_cast<std::chrono::milliseconds>(t_got_images - t_start).count()
-                  << " ms, Stitching: "
-                  << std::chrono::duration_cast<std::chrono::milliseconds>(t_stitched - t_got_images).count()
-                  << " ms, Push: "
-                  << std::chrono::duration_cast<std::chrono::milliseconds>(t_pushed - t_stitched).count()
-                  << " ms, Total: "
+        // 将拼接后的图像存入缓冲区
+        frame_buffer.push(image_concat_umat_);
+
+        // 如果缓冲区已满，等待推送并清空缓冲区
+        if (frame_buffer.size() > max_buffer_size) {
+            while (!frame_buffer.empty()) {
+                PushFrame(frame_buffer.front());
+                frame_buffer.pop();
+                std::this_thread::sleep_for(std::chrono::milliseconds(16)); // 控制帧率，确保60fps
+            }
+        }
+
+        frame_idx++;
+
+        auto t_pushed = std::chrono::steady_clock::now();
+        std::cout << "Total: "
                   << std::chrono::duration_cast<std::chrono::milliseconds>(t_pushed - t_start).count()
                   << " ms" << std::endl;
     }
