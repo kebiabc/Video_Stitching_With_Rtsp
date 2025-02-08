@@ -4,8 +4,8 @@
 #include <string>
 #include <thread>
 #include <vector>
-#include <queue>
 #include <chrono>
+#include <zmq.hpp>
 
 #include "image_stitcher.h"
 #include "stitching_param_generater.h"
@@ -15,9 +15,42 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
 #include <libavutil/timestamp.h>
-#include <libavutil/error.h>
 }
 
+// 全局变量，用于存储目标坐标
+std::mutex target_mutex;
+double target_x = -1, target_y = -1;
+int target_camera_id = -1;
+bool target_updated = false;
+
+void zmq_listener() {
+    zmq::context_t context(1);
+    zmq::socket_t socket(context, ZMQ_SUB);  // 使用 SUB 套接字
+    socket.connect("tcp://localhost:5555");  // 连接至发送端地址
+    socket.set(zmq::sockopt::subscribe, "");
+
+    while (true) {
+        zmq::message_t msg;
+        if (socket.recv(msg, zmq::recv_flags::none)) { // 阻塞接收消息
+            std::string message(static_cast<char*>(msg.data()), msg.size());
+            int cam_id;
+            double x, y;
+            // 使用逗号分隔解析
+            if (sscanf(message.c_str(), "%d,%lf,%lf", &cam_id, &x, &y) == 3) {
+                std::lock_guard<std::mutex> lock(target_mutex);
+                target_camera_id = cam_id;
+                target_x = x;
+                target_y = y;
+                target_updated = true;
+                std::cout << "接收目标坐标: " << cam_id << ", " << x << ", " << y << std::endl;
+            } else {
+                std::cerr << "解析消息失败: " << message << std::endl;
+            }
+        } else {
+            std::cerr << "接收消息失败" << std::endl;
+        }
+    }
+}
 // 构造函数
 App::App() : is_running_(false), total_cols_(0) {
     sensor_data_interface_.InitVideoCapture();
@@ -62,6 +95,7 @@ App::App() : is_running_(false), total_cols_(0) {
     image_concat_umat_ = cv::UMat(image_roi_vect[0].height, total_cols_, CV_8UC3);
 }
 
+
 // 推流函数
 void App::PushFrame(const cv::UMat& frame) {
     static bool initialized = false;
@@ -86,15 +120,23 @@ void App::PushFrame(const cv::UMat& frame) {
         codec_ctx->width = frame.cols;
         codec_ctx->height = frame.rows;
         codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
-        codec_ctx->time_base = {1, 24};
-        codec_ctx->framerate = {24, 1};
-        codec_ctx->bit_rate = 8 * 1024 * 1024;
-        codec_ctx->gop_size = 50;
+        codec_ctx->time_base = {1, 30};
+        codec_ctx->framerate = {30, 1};
+        codec_ctx->bit_rate = 20 * 1024 * 1024;
+        codec_ctx->gop_size = 5;
 
-        if (avcodec_open2(codec_ctx, codec, nullptr) < 0) {
-            std::cerr << "Failed to open codec!" << std::endl;
+
+        // 设置快速编码参数
+        AVDictionary* codec_options = nullptr;
+        av_dict_set(&codec_options, "preset", "ultrafast", 0);
+        av_dict_set(&codec_options, "tune", "zerolatency", 0);
+        
+        if (avcodec_open2(codec_ctx, codec, &codec_options) < 0) {
+            std::cerr << "Failed to open codec" << std::endl;
+            av_dict_free(&codec_options);
             return;
         }
+        av_dict_free(&codec_options);
 
         sws_ctx = sws_getContext(frame.cols, frame.rows, AV_PIX_FMT_BGR24,
                                 frame.cols, frame.rows, AV_PIX_FMT_YUV420P,
@@ -135,7 +177,6 @@ void App::PushFrame(const cv::UMat& frame) {
     av_frame_free(&av_frame);
 }
 
-// 拼接图像帧
 void App::StitchFrames() {
     std::vector<cv::UMat> image_vector(sensor_data_interface_.num_img_);
     std::vector<std::mutex> image_mutex_vector(sensor_data_interface_.num_img_);
@@ -147,13 +188,10 @@ void App::StitchFrames() {
 
     size_t frame_idx = 0;
 
-    // 图像中一个固定点 (x, y)
-    int x = 1000;  // 源图像中的 x 坐标
-    int y = 500;   // 源图像中的 y 坐标
-
-    // 用于计算拼接后图像中的位置
-    int total_offset_x = 0; // 总的 x 偏移量
-    const auto& roi_vector = image_stitcher_.getRoiVector(); // 获取 ROI 向量
+    // 额外存储上一次的目标坐标
+    int last_target_camera_id = -1;
+    double last_target_x = -1, last_target_y = -1;
+    bool last_target_valid = false;
 
     while (is_running_) {
         auto t_start = std::chrono::steady_clock::now();
@@ -161,12 +199,19 @@ void App::StitchFrames() {
         sensor_data_interface_.get_image_vector(image_vector, image_mutex_vector);
         auto t_got_images = std::chrono::steady_clock::now();
 
-        // 记录拼接后的图像的总宽度
-        total_offset_x = 0;
-        for (size_t i = 0; i < sensor_data_interface_.num_img_; ++i) {
-            total_offset_x += roi_vector[i].width;
+        // 检查是否有新的目标坐标
+        {
+            std::lock_guard<std::mutex> lock(target_mutex);
+            if (target_updated) {
+                last_target_camera_id = target_camera_id;
+                last_target_x = target_x;
+                last_target_y = target_y;
+                last_target_valid = true;  // 标记坐标有效
+                target_updated = false;
+            }
         }
 
+        // 拼接图像
         for (size_t img_idx = 0; img_idx < sensor_data_interface_.num_img_; ++img_idx) {
             warp_thread_vect.emplace_back(
                 &ImageStitcher::WarpImages,
@@ -185,24 +230,27 @@ void App::StitchFrames() {
         }
         auto t_stitched = std::chrono::steady_clock::now();
 
-        int offset_x = 0; // 当前图像的 x 偏移量（拼接时图像的左上角位置）
-        for (size_t img_idx = 0; img_idx < sensor_data_interface_.num_img_; ++img_idx) {
-            cv::Mat xmap = image_stitcher_.getFinalXMap(img_idx).getMat(cv::ACCESS_READ);
-            cv::Mat ymap = image_stitcher_.getFinalYMap(img_idx).getMat(cv::ACCESS_READ);
+        // 仅在坐标有效时标记目标位置
+        if (last_target_valid && last_target_camera_id >= 0 && last_target_camera_id < sensor_data_interface_.num_img_) {
+            const auto& roi_vector = image_stitcher_.getRoiVector();
+            int total_offset_x = 0;
+            for (size_t img_idx = 0; img_idx < last_target_camera_id; ++img_idx) {
+                total_offset_x += roi_vector[img_idx].width;
+            }
 
-            float new_x = xmap.at<float>(y, x);
-            float new_y = ymap.at<float>(y, x);
+            cv::Mat xmap = image_stitcher_.getFinalXMap(last_target_camera_id).getMat(cv::ACCESS_READ);
+            cv::Mat ymap = image_stitcher_.getFinalYMap(last_target_camera_id).getMat(cv::ACCESS_READ);
 
-            // 计算该点在拼接图像中的位置
-            int final_x = new_x + offset_x;
+            // 查找目标在拼接图中的位置
+            float new_x = xmap.at<float>(last_target_y, last_target_x);
+            float new_y = ymap.at<float>(last_target_y, last_target_x);
+
+            int final_x = new_x + total_offset_x;
             int final_y = new_y;
 
-            // 在拼接后的图像上标记该点并添加文本
-            cv::circle(image_concat_umat_, cv::Point(final_x, final_y), 5, cv::Scalar(0, 255, 0), -1); // 用绿色圆圈标记点
-            cv::putText(image_concat_umat_, "Position of steel billet", cv::Point(final_x + 10, final_y + 10), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0), 1);
-
-            // 更新下一个图像的偏移量
-            offset_x += roi_vector[img_idx].width;
+            // 在拼接后的图像上标记目标位置
+            cv::circle(image_concat_umat_, cv::Point(final_x, final_y), 15, cv::Scalar(0, 255, 0), -1); // 用绿色圆圈标记点
+            std::cout << "Target:(" << final_x << ", " << final_y << ")" << std::endl;
         }
 
         // 将拼接后的图像存入缓冲区
@@ -215,7 +263,13 @@ void App::StitchFrames() {
         frame_idx++;
 
         auto t_pushed = std::chrono::steady_clock::now();
-        std::cout << "Total: "
+        std::cout << "Image capture: "
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(t_got_images - t_start).count()
+                  << " ms, Stitching: "
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(t_stitched - t_got_images).count()
+                  << " ms, Push: "
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(t_pushed - t_stitched).count()
+                  << " ms, Total: "
                   << std::chrono::duration_cast<std::chrono::milliseconds>(t_pushed - t_start).count()
                   << " ms" << std::endl;
     }
@@ -238,13 +292,16 @@ void App::StreamFrames() {
         if (!frame_to_push.empty()) {
             PushFrame(frame_to_push);
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(16)); // 控制推流速率，确保60fps
+        // std::this_thread::sleep_for(std::chrono::milliseconds(33)); // 控制推流速率，确保30fps
     }
 }
 
 // 主运行函数
 [[noreturn]] void App::run_stitching() {
     is_running_ = true;
+
+    // 启动 ZeroMQ 监听线程
+    std::thread zmq_thread(zmq_listener);
 
     // 启动拼接和推流线程
     stitching_thread_ = std::thread(&App::StitchFrames, this);
@@ -253,10 +310,12 @@ void App::StreamFrames() {
     // 等待两个线程结束
     stitching_thread_.join();
     streaming_thread_.join();
+
+    // 等待 ZeroMQ 线程结束
+    zmq_thread.join();
 }
 
 int main() {
     App app;
     app.run_stitching();
 }
-
