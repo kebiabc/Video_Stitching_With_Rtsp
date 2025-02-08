@@ -1,10 +1,12 @@
-cmake_minimum_required(VERSION 2.8)
+cmake_minimum_required(VERSION 3.10)
 add_definitions(-std=c++11)
 project(image-stitching)
 set(cmake_c_flags_debug "-g -Wall")
 
 find_package(OpenCV 4 REQUIRED)
 find_package(PkgConfig REQUIRED)
+find_package(ZeroMQ REQUIRED)
+
 
 pkg_check_modules(AVFORMAT REQUIRED libavformat)
 pkg_check_modules(AVCODEC REQUIRED libavcodec)
@@ -35,7 +37,7 @@ add_executable(${PROJECT_NAME}
     include/image_stitcher.h
 )
 
-target_link_libraries(${PROJECT_NAME}
+target_link_libraries(${PROJECT_NAME} PRIVATE
     ${OpenCV_LIBS}
     ${AVFORMAT_LIBRARIES}
     ${AVCODEC_LIBRARIES}
@@ -45,4 +47,5 @@ target_link_libraries(${PROJECT_NAME}
     ${SWRESAMPLE_LIBRARIES}
     -lpthread
     -lm
+    zmq
 )
