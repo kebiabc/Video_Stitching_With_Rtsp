@@ -1,4 +1,4 @@
-# Image Stitching and Streaming System
+# Video Stitching and Streaming System with Iron Slab Detection
 
 ## Overview
 This project implements an image stitching and streaming system that captures images from multiple cameras, stitches them into a panoramic view, and streams the result in real-time via RTSP. Additionally, it listens for target coordinates via ZeroMQ and marks the target position dynamically on the stitched image.
