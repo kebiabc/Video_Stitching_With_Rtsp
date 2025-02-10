@@ -261,7 +261,7 @@ void App::StitchFrames() {
         }
 
         frame_idx++;
-
+        std::this_thread::sleep_for(std::chrono::milliseconds(5)); // 控制生成速率
         auto t_pushed = std::chrono::steady_clock::now();
         std::cout << "Image capture: "
                   << std::chrono::duration_cast<std::chrono::milliseconds>(t_got_images - t_start).count()
@@ -278,6 +278,8 @@ void App::StitchFrames() {
 // 推流图像帧
 void App::StreamFrames() {
     while (is_running_) {
+        auto t_start = std::chrono::steady_clock::now(); // 记录开始时间
+        
         cv::UMat frame_to_push;
         {
             std::unique_lock<std::mutex> lock(buffer_mutex_);
@@ -289,15 +291,27 @@ void App::StreamFrames() {
             }
         }
 
+        auto t_got_frame = std::chrono::steady_clock::now(); // 记录取帧结束时间
+
         if (!frame_to_push.empty()) {
             PushFrame(frame_to_push);
         }
-        // std::this_thread::sleep_for(std::chrono::milliseconds(33)); // 控制推流速率，确保30fps
+        // std::this_thread::sleep_for(std::chrono::milliseconds(5)); // 控制推流速率，两者匹配
+
+        auto t_pushed = std::chrono::steady_clock::now(); // 记录推流完成时间
+
+        std::cout << "Fetch frame: "
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(t_got_frame - t_start).count()
+                  << " ms, Push frame: "
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(t_pushed - t_got_frame).count()
+                  << " ms, Total: "
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(t_pushed - t_start).count()
+                  << " ms" << std::endl;
     }
 }
 
 // 主运行函数
-[[noreturn]] void App::run_stitching() {
+void App::run_stitching() {
     is_running_ = true;
 
     // 启动 ZeroMQ 监听线程
