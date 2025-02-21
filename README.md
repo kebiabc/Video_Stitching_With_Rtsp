@@ -35,7 +35,7 @@ make
 ## Usage
 Run the application with:
 ```bash
-./image_stitching_app
+./image_stitching
 ```
 
 ## Configuration
