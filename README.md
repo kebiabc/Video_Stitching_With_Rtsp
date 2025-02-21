@@ -12,8 +12,8 @@ This project implements an image stitching and streaming system that captures im
 ## Dependencies
 Ensure you have the following dependencies installed:
 
-- CMAKE > 3.10
-- OpenCV
+- CMAKE 3.10+
+- OpenCV4
 - ZeroMQ (`zmq`)
 - FFmpeg (`libavformat`, `libavcodec`, `libswscale`, `libavutil`)
 - C++ Standard Library (C++11 or newer)
