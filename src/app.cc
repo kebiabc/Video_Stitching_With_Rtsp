@@ -51,10 +51,100 @@ void zmq_listener() {
         }
     }
 }
+
+
+// 初始化推流逻辑
+void App::InitializeStreaming() {
+    avformat_network_init();
+    // 设置 RTSP 输出上下文，强制使用 TCP 协议
+    AVCodec* codec = avcodec_find_encoder_by_name("libx265");  // 使用 H.265 编码器
+    if (!codec) {
+        std::cerr << "Codec H.265 (libx265) not found!" << std::endl;
+        return;
+    }
+
+    fmt_ctx_ = nullptr;
+    video_stream_ = nullptr;
+    codec_ctx_ = nullptr;
+    sws_ctx_ = nullptr;
+
+    // avformat_alloc_output_context2(&fmt_ctx_, nullptr, "rtsp", "rtsp://192.168.204.33:5544/live/s1");
+    avformat_alloc_output_context2(&fmt_ctx_, nullptr, "rtsp", "rtsp://192.168.1.81:8554/live");
+    if (!fmt_ctx_) {
+        std::cerr << "Could not allocate output context" << std::endl;
+        return;
+    }
+
+    video_stream_ = avformat_new_stream(fmt_ctx_, codec);
+    if (!video_stream_) {
+        std::cerr << "Failed to allocate video stream" << std::endl;
+        return;
+    }
+
+    codec_ctx_ = avcodec_alloc_context3(codec);
+    if (!codec_ctx_) {
+        std::cerr << "Failed to allocate codec context" << std::endl;
+        return;
+    }
+
+    // 获取第一帧图像
+    cv::UMat first_frame = sensor_data_interface_.GetFirstFrame();
+    if (first_frame.empty()) {
+        std::cerr << "Failed to get first frame" << std::endl;
+        return;
+    }
+
+    cv::Mat first_frame_mat = first_frame.getMat(cv::ACCESS_READ);
+    codec_ctx_->width = first_frame_mat.cols;
+    codec_ctx_->height = first_frame_mat.rows;
+    codec_ctx_->pix_fmt = AV_PIX_FMT_YUV420P;
+    codec_ctx_->time_base = {1, 15};
+    codec_ctx_->framerate = {15, 1};
+    codec_ctx_->bit_rate = 1500000;  // 设置初始码率
+
+    // 启用自适应码率（VBR）
+    codec_ctx_->rc_min_rate = 0;  // 不限制最小码率
+    codec_ctx_->rc_max_rate = 0;  // 不限制最大码率
+    codec_ctx_->rc_buffer_size = 0;  // 不限制缓冲区大小
+    codec_ctx_->gop_size = 5;
+    codec_ctx_->max_b_frames = 0;
+
+    // 设置快速编码参数
+    AVDictionary* codec_options = nullptr;
+    av_dict_set(&codec_options, "preset", "ultrafast", 0);  // 编码速度优先
+    av_dict_set(&codec_options, "tune", "zerolatency", 0);  // 低延迟
+    av_dict_set(&codec_options, "rtsp_transport", "tcp", 0);  // 使用 TCP 传输
+    av_dict_set(&codec_options, "flush_packets", "1", 0);  // 立即发送数据包
+    av_dict_set(&codec_options, "x265-params", "vbv-bufsize=8000:vbv-maxrate=8000", 0);  // 设置自适应码率参数
+
+    if (avcodec_open2(codec_ctx_, codec, &codec_options) < 0) {
+        std::cerr << "Failed to open codec" << std::endl;
+        av_dict_free(&codec_options);
+        return;
+    }
+    av_dict_free(&codec_options);
+
+    sws_ctx_ = sws_getContext(
+        first_frame_mat.cols, first_frame_mat.rows, AV_PIX_FMT_BGR24,
+        first_frame_mat.cols, first_frame_mat.rows, AV_PIX_FMT_YUV420P,
+        SWS_BICUBIC, nullptr, nullptr, nullptr
+    );
+
+    avcodec_parameters_from_context(video_stream_->codecpar, codec_ctx_);
+    video_stream_->time_base = codec_ctx_->time_base;
+
+    if (avformat_write_header(fmt_ctx_, nullptr) < 0) {
+        std::cerr << "Failed to write header!" << std::endl;
+        return;
+    }
+}
+
 // 构造函数
 App::App() : is_running_(false), total_cols_(0) {
+    // 初始化视频捕获
     sensor_data_interface_.InitVideoCapture();
 
+    // 初始化拼接参数
     std::vector<cv::UMat> first_image_vector = std::vector<cv::UMat>(sensor_data_interface_.num_img_);
     std::vector<cv::Mat> first_mat_vector = std::vector<cv::Mat>(sensor_data_interface_.num_img_);
     std::vector<cv::UMat> reproj_xmap_vector;
@@ -88,93 +178,18 @@ App::App() : is_running_(false), total_cols_(0) {
         reproj_ymap_vector,
         image_roi_vect
     );
+
+    // 计算总宽度
     total_cols_ = 0;
     for (size_t i = 0; i < sensor_data_interface_.num_img_; ++i) {
         total_cols_ += image_roi_vect[i].width;
     }
+
+    // 初始化拼接图像
     image_concat_umat_ = cv::UMat(image_roi_vect[0].height, total_cols_, CV_8UC3);
-}
 
-
-// 推流函数
-void App::PushFrame(const cv::UMat& frame) {
-    static bool initialized = false;
-    static AVFormatContext* fmt_ctx = nullptr;
-    static AVStream* video_stream = nullptr;
-    static AVCodecContext* codec_ctx = nullptr;
-    static SwsContext* sws_ctx = nullptr;
-    static int64_t frame_index = 0;
-
-    if (!initialized) {
-        avformat_network_init();
-        avformat_alloc_output_context2(&fmt_ctx, nullptr, "rtsp", "rtsp://192.168.1.81:8554/live");
-
-        AVCodec* codec = avcodec_find_encoder_by_name("libx264");
-        if (!codec) {
-            std::cerr << "Codec H.264 not found!" << std::endl;
-            return;
-        }
-
-        video_stream = avformat_new_stream(fmt_ctx, codec);
-        codec_ctx = avcodec_alloc_context3(codec);
-        codec_ctx->width = frame.cols;
-        codec_ctx->height = frame.rows;
-        codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
-        codec_ctx->time_base = {1, 30};
-        codec_ctx->framerate = {30, 1};
-        codec_ctx->bit_rate = 20 * 1024 * 1024;
-        codec_ctx->gop_size = 5;
-
-
-        // 设置快速编码参数
-        AVDictionary* codec_options = nullptr;
-        av_dict_set(&codec_options, "preset", "ultrafast", 0);
-        av_dict_set(&codec_options, "tune", "zerolatency", 0);
-        
-        if (avcodec_open2(codec_ctx, codec, &codec_options) < 0) {
-            std::cerr << "Failed to open codec" << std::endl;
-            av_dict_free(&codec_options);
-            return;
-        }
-        av_dict_free(&codec_options);
-
-        sws_ctx = sws_getContext(frame.cols, frame.rows, AV_PIX_FMT_BGR24,
-                                frame.cols, frame.rows, AV_PIX_FMT_YUV420P,
-                                SWS_BICUBIC, nullptr, nullptr, nullptr);
-
-        avcodec_parameters_from_context(video_stream->codecpar, codec_ctx);
-        video_stream->time_base = codec_ctx->time_base;
-
-        if (avformat_write_header(fmt_ctx, nullptr) < 0) {
-            std::cerr << "Failed to write header!" << std::endl;
-            return;
-        }
-
-        initialized = true;
-    }
-
-    AVFrame* av_frame = av_frame_alloc();
-    av_frame->width = codec_ctx->width;
-    av_frame->height = codec_ctx->height;
-    av_frame->format = codec_ctx->pix_fmt;
-    av_frame_get_buffer(av_frame, 0);
-
-    uint8_t* bgr_data[1] = {frame.getMat(cv::ACCESS_READ).data};
-    int bgr_linesize[1] = {int(frame.step)};
-    sws_scale(sws_ctx, bgr_data, bgr_linesize, 0, frame.rows, av_frame->data, av_frame->linesize);
-
-    int64_t duration = av_rescale_q(1, {1, 30}, codec_ctx->time_base);
-    av_frame->pts = frame_index * duration;
-    frame_index++;
-
-    AVPacket* pkt = av_packet_alloc();
-    avcodec_send_frame(codec_ctx, av_frame);
-    while (avcodec_receive_packet(codec_ctx, pkt) == 0) {
-        av_write_frame(fmt_ctx, pkt);
-        av_packet_unref(pkt);
-    }
-    av_packet_free(&pkt);
-    av_frame_free(&av_frame);
+    // 初始化推流
+    InitializeStreaming();
 }
 
 void App::StitchFrames() {
@@ -261,7 +276,7 @@ void App::StitchFrames() {
         }
 
         frame_idx++;
-        std::this_thread::sleep_for(std::chrono::milliseconds(5)); // 控制生成速率
+        std::this_thread::sleep_for(std::chrono::milliseconds(33)); // 控制生成速率
         auto t_pushed = std::chrono::steady_clock::now();
         std::cout << "Image capture: "
                   << std::chrono::duration_cast<std::chrono::milliseconds>(t_got_images - t_start).count()
@@ -275,12 +290,47 @@ void App::StitchFrames() {
     }
 }
 
+// 推流函数
+void App::PushFrame(const cv::UMat& frame) {
+    static int64_t frame_index = 0;
+
+    // 调整图像尺寸使得高度和宽度为2的倍数
+    cv::Mat adjusted_frame = frame.getMat(cv::ACCESS_RW);
+    if (frame.rows % 2 != 0 || frame.cols % 2 != 0) {
+        cv::resize(adjusted_frame, adjusted_frame, cv::Size(frame.cols / 2 * 2, frame.rows / 2 * 2));
+    }
+
+    AVFrame* av_frame = av_frame_alloc();
+    av_frame->width = codec_ctx_->width;
+    av_frame->height = codec_ctx_->height;
+    av_frame->format = codec_ctx_->pix_fmt;
+    av_frame_get_buffer(av_frame, 0);
+
+    uint8_t* bgr_data[1] = {adjusted_frame.data};
+    int bgr_linesize[1] = {int(adjusted_frame.step)};
+    sws_scale(sws_ctx_, bgr_data, bgr_linesize, 0, adjusted_frame.rows, av_frame->data, av_frame->linesize);
+
+    int64_t duration = av_rescale_q(1, {1, 30}, codec_ctx_->time_base);
+    av_frame->pts = frame_index * duration;
+    frame_index++;
+
+    AVPacket* pkt = av_packet_alloc();
+    if (avcodec_send_frame(codec_ctx_, av_frame) >= 0) {
+        while (avcodec_receive_packet(codec_ctx_, pkt) >= 0) {
+            av_interleaved_write_frame(fmt_ctx_, pkt);
+            av_packet_unref(pkt);
+        }
+    }
+    av_frame_free(&av_frame);
+    av_packet_free(&pkt);
+}
+
+
 // 推流图像帧
 void App::StreamFrames() {
     while (is_running_) {
-        auto t_start = std::chrono::steady_clock::now(); // 记录开始时间
-        
         cv::UMat frame_to_push;
+
         {
             std::unique_lock<std::mutex> lock(buffer_mutex_);
             buffer_cond_.wait(lock, [this] { return !frame_buffer_.empty() || !is_running_; });
@@ -291,22 +341,11 @@ void App::StreamFrames() {
             }
         }
 
-        auto t_got_frame = std::chrono::steady_clock::now(); // 记录取帧结束时间
-
         if (!frame_to_push.empty()) {
             PushFrame(frame_to_push);
         }
-        // std::this_thread::sleep_for(std::chrono::milliseconds(5)); // 控制推流速率，两者匹配
 
-        auto t_pushed = std::chrono::steady_clock::now(); // 记录推流完成时间
-
-        std::cout << "Fetch frame: "
-                  << std::chrono::duration_cast<std::chrono::milliseconds>(t_got_frame - t_start).count()
-                  << " ms, Push frame: "
-                  << std::chrono::duration_cast<std::chrono::milliseconds>(t_pushed - t_got_frame).count()
-                  << " ms, Total: "
-                  << std::chrono::duration_cast<std::chrono::milliseconds>(t_pushed - t_start).count()
-                  << " ms" << std::endl;
+        std::this_thread::sleep_for(std::chrono::milliseconds(33)); // 控制推流速率
     }
 }
 
@@ -314,19 +353,13 @@ void App::StreamFrames() {
 void App::run_stitching() {
     is_running_ = true;
 
-    // 启动 ZeroMQ 监听线程
     std::thread zmq_thread(zmq_listener);
-
-    // 启动拼接和推流线程
     stitching_thread_ = std::thread(&App::StitchFrames, this);
     streaming_thread_ = std::thread(&App::StreamFrames, this);
 
-    // 等待两个线程结束
+    zmq_thread.join();
     stitching_thread_.join();
     streaming_thread_.join();
-
-    // 等待 ZeroMQ 线程结束
-    zmq_thread.join();
 }
 
 int main() {
