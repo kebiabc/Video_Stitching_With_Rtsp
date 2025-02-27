@@ -1,6 +1,3 @@
-// Created by s1nh.org..
-// https://zhuanlan.zhihu.com/p/38136322
-
 #include "sensor_data_interface.h"
 
 #include <string>
