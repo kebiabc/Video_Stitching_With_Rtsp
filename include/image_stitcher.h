@@ -1,5 +1,3 @@
-// Created by s1nh.org.
-
 #ifndef IMAGE_STITCHING_IMAGE_STITCHER_H
 #define IMAGE_STITCHING_IMAGE_STITCHER_H
 
