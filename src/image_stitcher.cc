@@ -1,5 +1,3 @@
-// Created by s1nh.org.
-
 #include "image_stitcher.h"
 
 #include <thread>
