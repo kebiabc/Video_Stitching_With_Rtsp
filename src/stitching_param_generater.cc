@@ -67,11 +67,19 @@ void StitchingParamGenerator::InitCameraParam() {
         auto* pts = static_cast<std::vector<Point2f>*>(userdata);
         pts->emplace_back(x, y);
         std::cout << "Point selected: " << x << ", " << y << std::endl;
+        Mat* img = static_cast<Mat*>(pts->data());
+        circle(*img, Point(x, y), 5, Scalar(0, 0, 255), -1);
+        imshow("Select Points", *img);
       }
     }, &points);
 
     imshow("Select Points", display_img);
-    waitKey(0);
+    while (true) {
+      char key = (char)waitKey(1);
+      if (key == 13) { // Enter key to confirm
+        break;
+      }
+    }
     destroyWindow("Select Points");
 
     manual_points.insert(manual_points.end(), points.begin(), points.end());
