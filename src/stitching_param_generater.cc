@@ -54,24 +54,31 @@ StitchingParamGenerator::StitchingParamGenerator(
 }
 
 void StitchingParamGenerator::InitCameraParam() {
-  std::vector<ImageFeatures> features(num_img_);
+   std::vector<ImageFeatures> features(num_img_);
   std::vector<Point2f> manual_points;
+
+  // Define a struct to hold callback data
+  struct CallbackData {
+    std::vector<cv::Point2f>* points;
+    cv::Mat* image;
+  };
 
   for (int i = 0; i < num_img_; ++i) {
     std::cout << "Please select keypoints for image #" << i + 1 << "\n";
     Mat display_img = image_vector_[i].clone();
-
     std::vector<Point2f> points;
+
+    CallbackData data = { &points, &display_img };
+
     setMouseCallback("Select Points", [](int event, int x, int y, int, void* userdata) {
+      CallbackData* data = static_cast<CallbackData*>(userdata);
       if (event == EVENT_LBUTTONDOWN) {
-        auto* pts = static_cast<std::vector<Point2f>*>(userdata);
-        pts->emplace_back(x, y);
+        data->points->emplace_back(x, y);
         std::cout << "Point selected: " << x << ", " << y << std::endl;
-        Mat* img = static_cast<Mat*>(pts->data());
-        circle(*img, Point(x, y), 5, Scalar(0, 0, 255), -1);
-        imshow("Select Points", *img);
+        circle(*(data->image), Point(x, y), 5, Scalar(0, 0, 255), -1);
+        imshow("Select Points", *(data->image));
       }
-    }, &points);
+    }, &data);
 
     imshow("Select Points", display_img);
     while (true) {
@@ -91,7 +98,7 @@ void StitchingParamGenerator::InitCameraParam() {
     features[i].img_idx = i;
     LOGLN("Manual Features in image #" << i + 1 << ": " << features[i].keypoints.size());
   }
-
+    
   LOGLN("Pairwise matching");
   std::vector<MatchesInfo> pairwise_matches;
   Ptr<FeaturesMatcher> matcher = makePtr<BestOf2NearestMatcher>(false, 0.3f);
